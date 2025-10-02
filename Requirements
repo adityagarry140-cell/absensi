@@ -1,0 +1,7 @@
+streamlit==1.50.0
+opencv-contrib-python==4.11.0.86
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn
+pillow==11.3.0
+pytz
