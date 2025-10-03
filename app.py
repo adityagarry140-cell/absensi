@@ -71,6 +71,17 @@ def load_known_faces():
         with open(ENCODINGS_PATH, "rb") as f:
             data = pickle.load(f)
             if isinstance(data, dict):
+                # Validasi panjang embedding
+                if data["embeddings"]:
+                    expected_len = len(np.array(data["embeddings"][0]).flatten())
+                    valid_names = []
+                    valid_embeddings = []
+                    for name, emb in zip(data["names"], data["embeddings"]):
+                        emb_flat = np.array(emb).flatten()
+                        if len(emb_flat) == expected_len:
+                            valid_names.append(name)
+                            valid_embeddings.append(emb)
+                    return {"names": valid_names, "embeddings": valid_embeddings}
                 return data
             else:
                 return {"names": [], "embeddings": []}
@@ -263,6 +274,12 @@ with tab1:
             emb, bbox = detect_face_features(img)
         
         if emb is not None:
+            # Validasi panjang feature vector
+            expected_len = len(np.array(faces_data["embeddings"][0]).flatten()) if faces_data["embeddings"] else len(emb)
+            if len(emb) != expected_len:
+                st.error(f"Feature mismatch! Data lama perlu didaftar ulang. Silakan reset data di tab Pengaturan")
+                st.stop()
+            
             # Predict dengan probability
             proba = clf.predict_proba([emb])[0]
             max_proba = max(proba)
@@ -424,6 +441,9 @@ with tab4:
     
     # Reset data
     st.subheader("Reset Data")
+    
+    st.warning("⚠️ **PENTING**: Jika update sistem face recognition, semua data wajah harus didaftar ulang!")
+    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -437,5 +457,6 @@ with tab4:
             if os.path.exists(ATTENDANCE_PATH):
                 os.remove(ATTENDANCE_PATH)
             st.success("Data berhasil dihapus!")
+            st.info("Silakan daftar ulang semua wajah di tab Pendaftaran")
             time.sleep(1)
             st.rerun()
