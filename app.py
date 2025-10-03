@@ -27,6 +27,17 @@ SHEET_NAME = "Absensi"
 
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
+# Konfigurasi Funnel dan Leader
+FUNNELS = {
+    "SF": "Short Form",
+    "FF": "Full Form"
+}
+
+LEADERS = {
+    "Analia": "R Analia Rizki Berliana Sari",
+    "Salsabila": "Salsabila Azzahra Maulidina"
+}
+
 # ================== GOOGLE SHEETS ==================
 @st.cache_resource
 def get_gsheet_client():
