@@ -83,27 +83,42 @@ def load_known_faces():
             data = pickle.load(f)
             if isinstance(data, dict):
                 # Validasi panjang embedding
-                if data["embeddings"]:
+                if data.get("embeddings"):
                     expected_len = len(np.array(data["embeddings"][0]).flatten())
                     valid_names = []
                     valid_embeddings = []
-                    for name, emb in zip(data["names"], data["embeddings"]):
+                    valid_funnels = []
+                    valid_leaders = []
+                    
+                    # Backward compatibility
+                    funnels = data.get("funnels", [""] * len(data["names"]))
+                    leaders = data.get("leaders", [""] * len(data["names"]))
+                    
+                    for i, (name, emb) in enumerate(zip(data["names"], data["embeddings"])):
                         emb_flat = np.array(emb).flatten()
                         if len(emb_flat) == expected_len:
                             valid_names.append(name)
                             valid_embeddings.append(emb)
-                    return {"names": valid_names, "embeddings": valid_embeddings}
+                            valid_funnels.append(funnels[i] if i < len(funnels) else "")
+                            valid_leaders.append(leaders[i] if i < len(leaders) else "")
+                    
+                    return {
+                        "names": valid_names, 
+                        "embeddings": valid_embeddings,
+                        "funnels": valid_funnels,
+                        "leaders": valid_leaders
+                    }
                 return data
             else:
-                return {"names": [], "embeddings": []}
+                return {"names": [], "embeddings": [], "funnels": [], "leaders": []}
     except FileNotFoundError:
-        return {"names": [], "embeddings": []}
+        return {"names": [], "embeddings": [], "funnels": [], "leaders": []}
 
 def save_known_faces(data):
     with open(ENCODINGS_PATH, "wb") as f:
         pickle.dump(data, f)
 
-def log_attendance(name):
+def log_attendance(name, funnel="", leader=""):
     """Catat absensi dengan validasi window 3 menit per jam"""
     if name == "Unknown":
         return False, "Wajah tidak dikenali"
@@ -128,10 +143,10 @@ def log_attendance(name):
         try:
             df = pd.read_csv(ATTENDANCE_PATH)
         except FileNotFoundError:
-            df = pd.DataFrame(columns=["Nama", "Waktu"])
+            df = pd.DataFrame(columns=["Nama", "Funnel", "Leader", "Waktu"])
         
         today = now.strftime("%Y-%m-%d")
-        current_hour_slot = now.strftime("%Y-%m-%d %H")  # Format: 2025-10-03 09
+        current_hour_slot = now.strftime("%Y-%m-%d %H")
         
         # Cek apakah sudah absen di jam yang sama hari ini
         if not df.empty:
@@ -139,14 +154,13 @@ def log_attendance(name):
             if not user_entries.empty:
                 for _, row in user_entries.iterrows():
                     entry_time_str = row["Waktu"]
-                    # Cek apakah ada absen di jam slot yang sama
-                    entry_hour_slot = entry_time_str[:13]  # Ambil YYYY-MM-DD HH
+                    entry_hour_slot = entry_time_str[:13]
                     if entry_hour_slot == current_hour_slot:
                         return False, f"{name} sudah absen pada jam {now.strftime('%H')}:00 hari ini"
         
         # Simpan ke CSV
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        new_row = pd.DataFrame([[name, now_str]], columns=["Nama", "Waktu"])
+        new_row = pd.DataFrame([[name, funnel, leader, now_str]], columns=["Nama", "Funnel", "Leader", "Waktu"])
         df = pd.concat([df, new_row], ignore_index=True)
         
         try:
@@ -155,7 +169,7 @@ def log_attendance(name):
             return False, f"Error menyimpan: {e}"
     
     # Update ke Google Sheets
-    gsheet_success = append_to_gsheet([name, now_str])
+    gsheet_success = append_to_gsheet([name, funnel, leader, now_str])
     
     if gsheet_success:
         return True, f"Absensi berhasil pada {now_str}"
@@ -313,11 +327,17 @@ with tab1:
             st.image(img, channels="BGR", use_container_width=True)
             
             if name != "Unknown":
-                success, message = log_attendance(name)
+                # Ambil info funnel dan leader dari database
+                name_index = faces_data["names"].index(name)
+                funnel = faces_data["funnels"][name_index] if name_index < len(faces_data.get("funnels", [])) else ""
+                leader = faces_data["leaders"][name_index] if name_index < len(faces_data.get("leaders", [])) else ""
+                
+                success, message = log_attendance(name, funnel, leader)
                 if success:
                     st.success(message)
+                    st.info(f"**{name}** | {funnel} | Leader: {leader}")
                     st.balloons()
-                    time.sleep(1.5)
+                    time.sleep(2)
                     st.rerun()
                 else:
                     st.warning(message)
@@ -333,12 +353,39 @@ with tab2:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        new_name = st.text_input("Nama Lengkap:")
+        new_name = st.text_input("Nama Lengkap:", key="input_nama")
+    
     with col2:
         st.metric("Total Terdaftar", len(faces_data["names"]))
     
+    # Dropdown Funnel - SELALU TAMPIL
+    st.subheader("Informasi Tim")
+    col_funnel, col_leader = st.columns(2)
+    
+    with col_funnel:
+        funnel_short = st.selectbox(
+            "Pilih Funnel:",
+            options=list(FUNNELS.keys()),
+            format_func=lambda x: f"{x} - {FUNNELS[x]}",
+            key="select_funnel"
+        )
+        funnel_full = FUNNELS[funnel_short]
+        st.caption(f"**{funnel_full}**")
+    
+    with col_leader:
+        leader_short = st.selectbox(
+            "Pilih Leader:",
+            options=list(LEADERS.keys()),
+            format_func=lambda x: LEADERS[x],
+            key="select_leader"
+        )
+        leader_full = LEADERS[leader_short]
+        st.caption(f"**{leader_full}**")
+    
+    st.divider()
+    
     if new_name:
-        photo = st.camera_input("Ambil foto wajah untuk pendaftaran")
+        photo = st.camera_input("Ambil foto wajah untuk pendaftaran", key="cam_pendaftaran")
         
         if photo:
             img = cv2.imdecode(np.frombuffer(photo.getvalue(), np.uint8), cv2.IMREAD_COLOR)
@@ -352,30 +399,40 @@ with tab2:
                 cv2.putText(img, new_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 
                 st.image(img, channels="BGR", use_container_width=True)
-                st.info("Pastikan wajah Anda terlihat jelas dan pencahayaan cukup untuk hasil terbaik")
                 
-                if st.button("💾 Simpan Wajah", type="primary"):
-                    # Cek duplikasi nama
+                # Tampilkan ringkasan data
+                st.success("Wajah terdeteksi!")
+                st.info(f"**Nama:** {new_name}\n\n**Funnel:** {funnel_full}\n\n**Leader:** {leader_full}")
+                
+                if st.button("💾 Simpan Data", type="primary", key="btn_simpan"):
                     if new_name in faces_data["names"]:
                         st.error(f"Nama '{new_name}' sudah terdaftar. Gunakan nama lain")
                     else:
                         faces_data["names"].append(new_name)
                         faces_data["embeddings"].append(emb.tolist())
+                        faces_data["funnels"].append(funnel_full)
+                        faces_data["leaders"].append(leader_full)
                         save_known_faces(faces_data)
-                        st.success(f"Wajah {new_name} berhasil disimpan!")
+                        st.success(f"Data {new_name} berhasil disimpan!")
                         st.balloons()
-                        time.sleep(1.5)
+                        time.sleep(2)
                         st.rerun()
             else:
-                st.error("Wajah tidak terdeteksi")
+                st.error("Wajah tidak terdeteksi. Coba lagi dengan pencahayaan lebih baik")
     else:
-        st.info("Masukkan nama terlebih dahulu")
+        st.info("👆 Masukkan nama terlebih dahulu untuk mulai pendaftaran")
     
-    # Daftar terdaftar
+    st.divider()
+    
+    # Daftar terdaftar dengan info lengkap
     if faces_data["names"]:
-        with st.expander("Lihat Daftar Terdaftar"):
-            for i, name in enumerate(faces_data["names"], 1):
-                st.write(f"{i}. {name}")
+        with st.expander("👥 Lihat Daftar Terdaftar"):
+            for i, name in enumerate(faces_data["names"]):
+                funnel = faces_data.get("funnels", [])[i] if i < len(faces_data.get("funnels", [])) else "-"
+                leader = faces_data.get("leaders", [])[i] if i < len(faces_data.get("leaders", [])) else "-"
+                st.write(f"**{i+1}. {name}**")
+                st.caption(f"   Funnel: {funnel} | Leader: {leader}")
+                st.divider()
 
 # ============ TAB LAPORAN ============
 with tab3:
@@ -401,18 +458,39 @@ with tab3:
             today_df_copy = today_df.copy()
             today_df_copy["Jam"] = pd.to_datetime(today_df_copy["Waktu"]).dt.strftime("%H:%M")
             
+            # Reorder columns
+            columns = ["Nama", "Funnel", "Leader", "Jam", "Waktu"]
+            # Handle backward compatibility - jika kolom belum ada
+            existing_cols = [col for col in columns if col in today_df_copy.columns]
+            
             st.dataframe(
-                today_df_copy[["Nama", "Jam", "Waktu"]].sort_values(by="Waktu", ascending=False),
+                today_df_copy[existing_cols].sort_values(by="Waktu", ascending=False),
                 use_container_width=True,
                 hide_index=True
             )
             
-            # Summary per orang
-            with st.expander("📊 Summary per Orang"):
-                summary = today_df_copy.groupby("Nama").agg({
-                    "Waktu": "count"
-                }).rename(columns={"Waktu": "Total Absensi"})
-                st.dataframe(summary, use_container_width=True)
+            # Summary per funnel
+            col_summary1, col_summary2 = st.columns(2)
+            
+            with col_summary1:
+                with st.expander("📊 Summary per Funnel"):
+                    if "Funnel" in today_df_copy.columns:
+                        funnel_summary = today_df_copy.groupby("Funnel").agg({
+                            "Nama": "count"
+                        }).rename(columns={"Nama": "Total Absensi"})
+                        st.dataframe(funnel_summary, use_container_width=True)
+                    else:
+                        st.info("Data funnel belum tersedia")
+            
+            with col_summary2:
+                with st.expander("📊 Summary per Leader"):
+                    if "Leader" in today_df_copy.columns:
+                        leader_summary = today_df_copy.groupby("Leader").agg({
+                            "Nama": "count"
+                        }).rename(columns={"Nama": "Total Absensi"})
+                        st.dataframe(leader_summary, use_container_width=True)
+                    else:
+                        st.info("Data leader belum tersedia")
         else:
             st.info("Belum ada yang absen hari ini")
         
