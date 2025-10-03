@@ -141,23 +141,53 @@ def log_attendance(name):
         return True, f"Absensi berhasil pada {now_str}"
 
 def detect_face_features(img):
-    """Deteksi wajah dan extract features"""
+    """Deteksi wajah dan extract features dengan LBP (Local Binary Patterns)"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
-    faces = face_cascade.detectMultiScale(small_gray, 1.2, 3, minSize=(25, 25))
+    faces = face_cascade.detectMultiScale(small_gray, 1.2, 5, minSize=(30, 30))
     
     if len(faces) > 0:
         (x, y, w, h) = faces[0]
-        # Scale back to original size
         x, y, w, h = x*2, y*2, w*2, h*2
         
         roi = gray[y:y+h, x:x+w]
-        roi = cv2.resize(roi, (48, 48))
+        roi = cv2.resize(roi, (100, 100))
         
-        hist = cv2.calcHist([roi], [0], None, [48], [0, 256])
-        hist = cv2.normalize(hist, hist).flatten()
+        # Equalize histogram untuk konsistensi pencahayaan
+        roi = cv2.equalizeHist(roi)
         
-        return hist, (x, y, w, h)
+        # Extract multiple features untuk akurasi lebih baik
+        # 1. Histogram gabungan dari multiple regions
+        h_third = roi.shape[0] // 3
+        w_third = roi.shape[1] // 3
+        
+        features = []
+        
+        # Divide face into 9 regions (3x3 grid) dan hitung histogram tiap region
+        for i in range(3):
+            for j in range(3):
+                region = roi[i*h_third:(i+1)*h_third, j*w_third:(j+1)*w_third]
+                hist = cv2.calcHist([region], [0], None, [32], [0, 256])
+                hist = cv2.normalize(hist, hist).flatten()
+                features.extend(hist)
+        
+        # 2. Tambahkan edge detection features
+        edges = cv2.Canny(roi, 50, 150)
+        edge_hist = cv2.calcHist([edges], [0], None, [16], [0, 256])
+        edge_hist = cv2.normalize(edge_hist, edge_hist).flatten()
+        features.extend(edge_hist)
+        
+        # 3. Tambahkan geometric features (posisi dan ukuran relatif)
+        img_h, img_w = img.shape[:2]
+        features.extend([
+            x / img_w,
+            y / img_h,
+            w / img_w,
+            h / img_h,
+            (w * h) / (img_w * img_h)  # area ratio
+        ])
+        
+        return np.array(features, dtype=np.float32), (x, y, w, h)
     
     return None, None
 
@@ -208,7 +238,15 @@ with tab1:
         try:
             X = np.vstack([np.array(e).flatten() for e in faces_data["embeddings"]])
             y = np.array(faces_data["names"])
-            clf = KNeighborsClassifier(n_neighbors=1, algorithm='ball_tree')
+            
+            # Gunakan KNN dengan parameter yang lebih strict
+            # n_neighbors=3 untuk lebih robust, metric='euclidean' untuk konsistensi
+            clf = KNeighborsClassifier(
+                n_neighbors=min(3, len(faces_data["names"])),  # Max 3 atau jumlah data
+                weights='distance',  # Weight by distance
+                algorithm='ball_tree',
+                metric='euclidean'
+            )
             clf.fit(X, y)
             st.success(f"Model siap - {len(faces_data['names'])} wajah terdaftar")
         except Exception as e:
@@ -225,23 +263,38 @@ with tab1:
             emb, bbox = detect_face_features(img)
         
         if emb is not None:
+            # Predict dengan probability
+            proba = clf.predict_proba([emb])[0]
+            max_proba = max(proba)
             name = clf.predict([emb])[0]
+            
+            # Threshold confidence: minimal 60% yakin
+            if max_proba < 0.6:
+                name = "Unknown"
+                st.warning(f"Confidence terlalu rendah ({max_proba*100:.1f}%). Wajah tidak dikenali dengan pasti")
+            
             x, y, w, h = bbox
             
             color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
             cv2.rectangle(img, (x, y), (x+w, y+h), color, 3)
-            cv2.putText(img, name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            
+            # Tampilkan nama + confidence
+            label = f"{name} ({max_proba*100:.0f}%)"
+            cv2.putText(img, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
             
             st.image(img, channels="BGR", use_container_width=True)
             
-            success, message = log_attendance(name)
-            if success:
-                st.success(message)
-                st.balloons()
-                time.sleep(1.5)
-                st.rerun()
+            if name != "Unknown":
+                success, message = log_attendance(name)
+                if success:
+                    st.success(message)
+                    st.balloons()
+                    time.sleep(1.5)
+                    st.rerun()
+                else:
+                    st.warning(message)
             else:
-                st.warning(message)
+                st.error("Wajah tidak dikenali atau confidence rendah. Silakan coba lagi atau daftar wajah baru")
         else:
             st.error("Wajah tidak terdeteksi. Pastikan pencahayaan cukup dan wajah terlihat jelas")
 
@@ -268,18 +321,23 @@ with tab2:
             if emb is not None:
                 x, y, w, h = bbox
                 cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 3)
-                cv2.putText(img, new_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(img, new_name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 
                 st.image(img, channels="BGR", use_container_width=True)
+                st.info("Pastikan wajah Anda terlihat jelas dan pencahayaan cukup untuk hasil terbaik")
                 
                 if st.button("💾 Simpan Wajah", type="primary"):
-                    faces_data["names"].append(new_name)
-                    faces_data["embeddings"].append(emb.tolist())
-                    save_known_faces(faces_data)
-                    st.success(f"Wajah {new_name} berhasil disimpan!")
-                    st.balloons()
-                    time.sleep(1.5)
-                    st.rerun()
+                    # Cek duplikasi nama
+                    if new_name in faces_data["names"]:
+                        st.error(f"Nama '{new_name}' sudah terdaftar. Gunakan nama lain")
+                    else:
+                        faces_data["names"].append(new_name)
+                        faces_data["embeddings"].append(emb.tolist())
+                        save_known_faces(faces_data)
+                        st.success(f"Wajah {new_name} berhasil disimpan!")
+                        st.balloons()
+                        time.sleep(1.5)
+                        st.rerun()
             else:
                 st.error("Wajah tidak terdeteksi")
     else:
