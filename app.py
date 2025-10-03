@@ -82,16 +82,24 @@ def save_known_faces(data):
         pickle.dump(data, f)
 
 def log_attendance(name):
-    """Catat absensi dengan validasi jam dan interval 1 jam"""
+    """Catat absensi dengan validasi window 3 menit per jam"""
     if name == "Unknown":
         return False, "Wajah tidak dikenali"
     
     now = datetime.now(WIB)
     current_hour = now.hour
+    current_minute = now.minute
     
-    # Validasi jam operasional (09:00 - 15:00)
+    # Validasi jam operasional (09:00 - 14:59)
     if current_hour < 9 or current_hour >= 15:
-        return False, f"Absensi hanya bisa dilakukan jam 09:00 - 15:00. Sekarang jam {now.strftime('%H:%M')}"
+        return False, f"Absensi hanya bisa dilakukan jam 09:00 - 15:00. Sekarang {now.strftime('%H:%M')}"
+    
+    # Validasi window 3 menit (00-03 setiap jam)
+    if current_minute > 3:
+        next_hour = current_hour + 1
+        if next_hour >= 15:
+            return False, f"Window absensi sudah lewat. Jam absensi berikutnya: Besok jam 09:00"
+        return False, f"Window absensi sudah lewat. Jam absensi berikutnya: {next_hour:02d}:00-{next_hour:02d}:03"
     
     # Gunakan lock untuk prevent concurrent writes
     with attendance_lock:
@@ -100,21 +108,19 @@ def log_attendance(name):
         except FileNotFoundError:
             df = pd.DataFrame(columns=["Nama", "Waktu"])
         
-        # Cek absensi terakhir untuk user ini
+        today = now.strftime("%Y-%m-%d")
+        current_hour_slot = now.strftime("%Y-%m-%d %H")  # Format: 2025-10-03 09
+        
+        # Cek apakah sudah absen di jam yang sama hari ini
         if not df.empty:
             user_entries = df[df["Nama"] == name]
             if not user_entries.empty:
-                last_time_str = user_entries["Waktu"].iloc[-1]
-                try:
-                    last_time = WIB.localize(datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S"))
-                    time_diff = (now - last_time).total_seconds()
-                    
-                    # Minimal 1 jam (3600 detik) sejak absen terakhir
-                    if time_diff < 3600:
-                        remaining_minutes = int((3600 - time_diff) / 60)
-                        return False, f"{name} sudah absen pada {last_time.strftime('%H:%M')}. Silakan coba lagi {remaining_minutes} menit lagi"
-                except:
-                    pass
+                for _, row in user_entries.iterrows():
+                    entry_time_str = row["Waktu"]
+                    # Cek apakah ada absen di jam slot yang sama
+                    entry_hour_slot = entry_time_str[:13]  # Ambil YYYY-MM-DD HH
+                    if entry_hour_slot == current_hour_slot:
+                        return False, f"{name} sudah absen pada jam {now.strftime('%H')}:00 hari ini"
         
         # Simpan ke CSV
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -132,7 +138,7 @@ def log_attendance(name):
     if gsheet_success:
         return True, f"Absensi berhasil pada {now_str}"
     else:
-        return True, f"Absensi berhasil (CSV only) pada {now_str}"
+        return True, f"Absensi berhasil pada {now_str}"
 
 def detect_face_features(img):
     """Deteksi wajah dan extract features"""
@@ -170,20 +176,31 @@ with tab1:
     
     # Tampilkan waktu dan status
     now = datetime.now(WIB)
+    current_hour = now.hour
+    current_minute = now.minute
+    
     col_time, col_status = st.columns([2, 1])
     
     with col_time:
         st.info(f"🕒 {now.strftime('%H:%M:%S WIB')}")
     
     with col_status:
-        current_hour = now.hour
-        if 9 <= current_hour < 15:
-            st.success("✅ Jam Operasional")
-        else:
+        # Cek apakah dalam window absensi
+        in_window = (9 <= current_hour < 15) and (current_minute <= 3)
+        if in_window:
+            st.success("✅ Window Absensi")
+        elif current_hour < 9 or current_hour >= 15:
             st.error("❌ Di Luar Jam")
+        else:
+            next_hour = current_hour + 1
+            if next_hour < 15:
+                st.warning(f"⏳ Window berikutnya: {next_hour:02d}:00")
+            else:
+                st.warning("⏳ Window berikutnya: Besok")
     
-    # Info jam operasional
-    st.caption("⏰ Jam absensi: 09:00 - 15:00 | Interval: 1 jam/absensi")
+    # Info jadwal absensi
+    st.caption("⏰ Window absensi: **09:00-09:03, 10:00-10:03, 11:00-11:03, 12:00-12:03, 13:00-13:03, 14:00-14:03**")
+    st.caption("ℹ️ Anda dapat absen 1x per jam di window waktu tersebut")
     
     # Load model
     clf = None
@@ -224,7 +241,7 @@ with tab1:
                 time.sleep(1.5)
                 st.rerun()
             else:
-                st.info(message)
+                st.warning(message)
         else:
             st.error("Wajah tidak terdeteksi. Pastikan pencahayaan cukup dan wajah terlihat jelas")
 
