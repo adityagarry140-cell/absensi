@@ -11,6 +11,10 @@ from sklearn.neighbors import KNeighborsClassifier
 import os
 import time
 import json
+import threading
+
+# Lock untuk prevent concurrent writes
+attendance_lock = threading.Lock()
 
 # ================== KONFIGURASI ==================
 st.set_page_config(page_title="Absensi Face ID", layout="wide", initial_sidebar_state="collapsed")
@@ -78,40 +82,57 @@ def save_known_faces(data):
         pickle.dump(data, f)
 
 def log_attendance(name):
-    """Catat absensi dengan validasi duplikasi"""
+    """Catat absensi dengan validasi jam dan interval 1 jam"""
     if name == "Unknown":
         return False, "Wajah tidak dikenali"
     
-    try:
-        df = pd.read_csv(ATTENDANCE_PATH)
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=["Nama", "Waktu"])
+    now = datetime.now(WIB)
+    current_hour = now.hour
     
-    # Cek duplikasi (1 menit terakhir)
-    if not df.empty:
-        last_entry = df[df["Nama"] == name]
-        if not last_entry.empty:
-            try:
-                last_time_str = last_entry["Waktu"].iloc[-1]
-                last_time = WIB.localize(datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S"))
-                if (datetime.now(WIB) - last_time).total_seconds() < 60:
-                    return False, f"{name} sudah absen dalam 1 menit terakhir"
-            except:
-                pass
+    # Validasi jam operasional (09:00 - 15:00)
+    if current_hour < 9 or current_hour >= 15:
+        return False, f"Absensi hanya bisa dilakukan jam 09:00 - 15:00. Sekarang jam {now.strftime('%H:%M')}"
     
-    # Simpan ke CSV
-    now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")
-    new_row = pd.DataFrame([[name, now]], columns=["Nama", "Waktu"])
-    df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(ATTENDANCE_PATH, index=False)
+    # Gunakan lock untuk prevent concurrent writes
+    with attendance_lock:
+        try:
+            df = pd.read_csv(ATTENDANCE_PATH)
+        except FileNotFoundError:
+            df = pd.DataFrame(columns=["Nama", "Waktu"])
+        
+        # Cek absensi terakhir untuk user ini
+        if not df.empty:
+            user_entries = df[df["Nama"] == name]
+            if not user_entries.empty:
+                last_time_str = user_entries["Waktu"].iloc[-1]
+                try:
+                    last_time = WIB.localize(datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S"))
+                    time_diff = (now - last_time).total_seconds()
+                    
+                    # Minimal 1 jam (3600 detik) sejak absen terakhir
+                    if time_diff < 3600:
+                        remaining_minutes = int((3600 - time_diff) / 60)
+                        return False, f"{name} sudah absen pada {last_time.strftime('%H:%M')}. Silakan coba lagi {remaining_minutes} menit lagi"
+                except:
+                    pass
+        
+        # Simpan ke CSV
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        new_row = pd.DataFrame([[name, now_str]], columns=["Nama", "Waktu"])
+        df = pd.concat([df, new_row], ignore_index=True)
+        
+        try:
+            df.to_csv(ATTENDANCE_PATH, index=False)
+        except Exception as e:
+            return False, f"Error menyimpan: {e}"
     
     # Update ke Google Sheets
-    gsheet_success = append_to_gsheet([name, now])
+    gsheet_success = append_to_gsheet([name, now_str])
     
     if gsheet_success:
-        return True, f"Absensi berhasil dicatat (CSV + Google Sheets)"
+        return True, f"Absensi berhasil pada {now_str}"
     else:
-        return True, f"Absensi berhasil dicatat (CSV only)"
+        return True, f"Absensi berhasil (CSV only) pada {now_str}"
 
 def detect_face_features(img):
     """Deteksi wajah dan extract features"""
@@ -146,6 +167,23 @@ tab1, tab2, tab3, tab4 = st.tabs(["📷 Absensi", "📝 Pendaftaran", "📊 Lapo
 # ============ TAB ABSENSI ============
 with tab1:
     st.header("Absensi dengan Kamera")
+    
+    # Tampilkan waktu dan status
+    now = datetime.now(WIB)
+    col_time, col_status = st.columns([2, 1])
+    
+    with col_time:
+        st.info(f"🕒 {now.strftime('%H:%M:%S WIB')}")
+    
+    with col_status:
+        current_hour = now.hour
+        if 9 <= current_hour < 15:
+            st.success("✅ Jam Operasional")
+        else:
+            st.error("❌ Di Luar Jam")
+    
+    # Info jam operasional
+    st.caption("⏰ Jam absensi: 09:00 - 15:00 | Interval: 1 jam/absensi")
     
     # Load model
     clf = None
@@ -247,19 +285,35 @@ with tab3:
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Hadir Hari Ini", len(today_df))
+            st.metric("Absensi Hari Ini", len(today_df))
         with col2:
             st.metric("Total Terdaftar", len(faces_data["names"]))
         with col3:
-            st.metric("Total Absensi", len(df))
+            unique_today = today_df["Nama"].nunique() if not today_df.empty else 0
+            st.metric("Orang Unik Hari Ini", unique_today)
         
-        st.subheader("Kehadiran Hari Ini")
+        st.subheader("Riwayat Absensi Hari Ini")
         if not today_df.empty:
-            st.dataframe(today_df.sort_values(by="Waktu", ascending=False), use_container_width=True, hide_index=True)
+            # Tambahkan kolom jam untuk analisis
+            today_df_copy = today_df.copy()
+            today_df_copy["Jam"] = pd.to_datetime(today_df_copy["Waktu"]).dt.strftime("%H:%M")
+            
+            st.dataframe(
+                today_df_copy[["Nama", "Jam", "Waktu"]].sort_values(by="Waktu", ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Summary per orang
+            with st.expander("📊 Summary per Orang"):
+                summary = today_df_copy.groupby("Nama").agg({
+                    "Waktu": "count"
+                }).rename(columns={"Waktu": "Total Absensi"})
+                st.dataframe(summary, use_container_width=True)
         else:
             st.info("Belum ada yang absen hari ini")
         
-        with st.expander("Semua Riwayat"):
+        with st.expander("📜 Semua Riwayat"):
             st.dataframe(df.sort_values(by="Waktu", ascending=False), use_container_width=True, hide_index=True)
             
     except FileNotFoundError:
